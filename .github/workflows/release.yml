@@ -1,60 +1,31 @@
-name: Release
+name: Build & Release
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
-  workflow_dispatch:
 
 permissions:
   contents: write
-  pull-requests: write
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  prepare-manifest:
+  version:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
       - id: v
         run: |
           V=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          echo "version=$V" >> $GITHUB_OUTPUT
-          echo "{ \".\": \"$V\" }" > .release-please-manifest.json
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: manifest
-          path: .release-please-manifest.json
-
-  release-please:
-    needs: prepare-manifest
-    runs-on: ubuntu-latest
-    outputs:
-      released: ${{ steps.release.outputs.release_created }}
-      tag: ${{ steps.release.outputs.tag_name }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: manifest
-
-      - uses: googleapis/release-please-action@v4
-        id: release
-        with:
-          config-file: .github/release-please-config.json
-          manifest-file: .release-please-manifest.json
+          echo "version=v$V" >> $GITHUB_OUTPUT
 
   build:
-    needs: release-please
-    if: needs.release-please.outputs.released == 'true'
+    needs: version
     strategy:
       matrix:
         include:
@@ -87,29 +58,44 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          VERSION=${{ needs.release-please.outputs.tag }}
+          VERSION=${{ needs.version.outputs.version }}
           NAME=pyelevate-${VERSION}-${{ matrix.target }}
 
           mkdir dist
           cp target/${{ matrix.target }}/release/${{ matrix.bin }} dist/
 
           cd dist
-
           if [ "${{ matrix.archive }}" = "zip" ]; then
             powershell Compress-Archive -Path * -DestinationPath ../$NAME.zip
           else
             tar -czf ../$NAME.tar.gz *
           fi
-
           cd ..
+
           sha256sum $NAME.* > $NAME.sha256
 
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ needs.release-please.outputs.tag }}
-          files: |
+          name: ${{ matrix.target }}
+          path: |
             *.zip
             *.tar.gz
             *.sha256
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.version }}
+          name: PyElevate ${{ needs.version.outputs.version }}
+          files: artifacts/**/*
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
