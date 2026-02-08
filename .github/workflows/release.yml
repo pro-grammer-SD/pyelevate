@@ -45,7 +45,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -84,18 +83,26 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     outputs:
-      notes: ${{ steps.cliff.outputs.content }}
+      notes: ${{ steps.cliff.outputs.notes }}
+
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate Changelog with git-cliff
-        id: cliff
-        uses: orhun/git-cliff-action@v3
         with:
-          config: cliff.toml
-          args: --latest --strip header
-        env:
-          OUTPUT: CHANGELOG_GENERATED.md
+          fetch-depth: 0
+
+      - name: Install git-cliff (native, no Docker)
+        run: |
+          curl -sL https://github.com/orhun/git-cliff/releases/latest/download/git-cliff-x86_64-unknown-linux-gnu.tar.gz \
+          | tar -xz
+          sudo mv git-cliff /usr/local/bin/
+
+      - name: Generate changelog
+        id: cliff
+        run: |
+          git-cliff --config cliff.toml --latest --strip header > CHANGELOG_GENERATED.md
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          cat CHANGELOG_GENERATED.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
   release:
     needs: [version, build, changelog]
