@@ -1,10 +1,10 @@
-name: CI - Rust
+name: Rust CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
   workflow_dispatch:
 
 env:
@@ -12,97 +12,81 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  test:
-    name: Test on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, nightly]
-
+  setup-rust:
+    name: Setup Rust Toolchain
+    runs-on: ubuntu-latest
+    outputs:
+      rust-toolchain: ${{ steps.set-toolchain.outputs.toolchain }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - name: Set Rust toolchain
+        id: set-toolchain
+        run: echo "toolchain=stable" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           cache-all-crates: true
 
-      - name: Run tests
-        run: cargo test --verbose --all
+  test:
+    name: Test on ${{ matrix.os }} with ${{ matrix.rust }}
+    needs: setup-rust
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust: [stable, nightly]
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Run doc tests
-        run: cargo test --doc
+      - name: Use Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - run: cargo test --verbose --all
+      - run: cargo test --doc
 
   clippy:
     name: Clippy Lint
+    needs: setup-rust
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        components: clippy
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - uses: actions/checkout@v4
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
   fmt:
     name: Code Format
+    needs: setup-rust
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        components: rustfmt
-
-      - name: Check code formatting
-        run: cargo fmt -- --check
+      - uses: actions/checkout@v4
+      - run: cargo fmt -- --check
 
   security:
     name: Security Audit
+    needs: setup-rust
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Run security audit
-        uses: rustsec/audit-check-action@v1
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   coverage:
     name: Code Coverage
+    needs: setup-rust
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install tarpaulin
-        run: cargo install cargo-tarpaulin
-
-      - name: Generate coverage
-        run: cargo tarpaulin --out Xml --timeout 300
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+      - uses: actions/checkout@v4
+      - run: cargo install cargo-tarpaulin
+      - run: cargo tarpaulin --out Xml --timeout 300
+      - uses: codecov/codecov-action@v3
         with:
           files: ./cobertura.xml
