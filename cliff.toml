@@ -1,0 +1,50 @@
+[changelog]
+header = """
+# 🚀 PyElevate Release Notes
+"""
+
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+## {{ group }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }} ({{ commit.id | truncate(length=7, end="") }})
+{% endfor %}
+{% endfor %}
+"""
+
+footer = "\n---\nAuto-generated changelog"
+
+[git]
+conventional_commits = false
+
+# SMART GROUPING
+
+[[git.commit_parsers]]
+message = "(?i)feat|add|new"
+group = "✨ Features"
+
+[[git.commit_parsers]]
+message = "(?i)fix|bug|patch|issue"
+group = "🐛 Fixes"
+
+[[git.commit_parsers]]
+message = "(?i)perf|optimi|speed"
+group = "⚡ Performance"
+
+[[git.commit_parsers]]
+message = "(?i)doc|readme"
+group = "📖 Documentation"
+
+[[git.commit_parsers]]
+message = "(?i)refactor|cleanup"
+group = "♻️ Refactoring"
+
+[[git.commit_parsers]]
+message = "(?i)deps|build|ci|workflow"
+group = "⚙️ Build / CI"
+
+# CATCH-ALL
+
+[[git.commit_parsers]]
+message = ".*"
+group = "📝 Other Changes"
