@@ -1,125 +1,93 @@
-name: Build and Release App
+name: Release
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  version:
+  release-please:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.v.outputs.version }}
+      released: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: actions/checkout@v4
-      - id: v
-        run: |
-          V=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          echo "version=$V" >> $GITHUB_OUTPUT
-
-  changelog:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - uses: googleapis/release-please-action@v4
+        id: release
         with:
-          fetch-depth: 0
-
-      - name: Install git-cliff
-        run: |
-          VERSION=$(gh release view --repo orhun/git-cliff --json tagName -q .tagName)
-          curl -sL "https://github.com/orhun/git-cliff/releases/download/${VERSION}/git-cliff-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar -xz
-          sudo mv git-cliff /usr/local/bin/
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate changelog
-        run: git-cliff -o CHANGELOG.md
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: changelog
-          path: CHANGELOG.md
+          config-file: .github/release-please-config.json
 
   build:
-    needs: version
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true'
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin: pyelevate
-            osname: linux
             ext: ""
-            pack: tar
+            archive: tar.gz
+
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             bin: pyelevate.exe
-            osname: windows
             ext: ".exe"
-            pack: zip
+            archive: zip
+
           - os: macos-latest
             target: aarch64-apple-darwin
             bin: pyelevate
-            osname: macos-arm64
             ext: ""
-            pack: tar
+            archive: tar.gz
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
 
       - run: rustup target add ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Ensure zip exists
-        if: matrix.os == 'windows-latest'
-        run: choco install zip -y
+      - run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
         run: |
-          NAME=pyelevate-v${{ needs.version.outputs.version }}-${{ matrix.osname }}
-          mkdir pkg
-          cp target/${{ matrix.target }}/release/${{ matrix.bin }} pkg/pyelevate${{ matrix.ext }}
+          VERSION=${{ needs.release-please.outputs.tag }}
+          NAME=pyelevate-${VERSION}-${{ matrix.target }}
 
-          if [ "${{ matrix.pack }}" = "zip" ]; then
-            cd pkg && zip -9 ../$NAME.zip *
+          mkdir dist
+          cp target/${{ matrix.target }}/release/${{ matrix.bin }} dist/
+
+          cd dist
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            powershell Compress-Archive -Path * -DestinationPath ../$NAME.zip
           else
-            tar -C pkg -cJf $NAME.tar.xz .
+            tar -czf ../$NAME.tar.gz *
           fi
 
+          cd ..
           sha256sum $NAME.* > $NAME.sha256
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.osname }}
-          path: |
-            *.zip
-            *.tar.xz
-            *.sha256
-
-  release:
-    needs: [version, build, changelog]
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.version.outputs.version }}
-          name: PyElevate v${{ needs.version.outputs.version }}
-          body_path: artifacts/changelog/CHANGELOG.md
-          files: artifacts/**/*
+          tag_name: ${{ needs.release-please.outputs.tag }}
+          files: |
+            *.zip
+            *.tar.gz
+            *.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
