@@ -1,394 +1,102 @@
-name: Release PyElevate
+name: Build & Release
 
 on:
   workflow_dispatch:
-    inputs:
-      release_type:
-        description: 'Release type'
-        required: true
-        default: 'patch'
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
+  push:
+    branches: [ main ]
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          V=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=v$V" >> $GITHUB_OUTPUT
+
   build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    needs: version
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: pyelevate
-            asset_name: pyelevate-linux-x86_64
-            strip: true
-
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            artifact_name: pyelevate
-            asset_name: pyelevate-linux-musl-x86_64
-            strip: true
-
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact_name: pyelevate
-            asset_name: pyelevate-macos-x86_64
-            strip: true
-
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: pyelevate
-            asset_name: pyelevate-macos-aarch64
-            strip: true
+            bin: pyelevate
+            archive: tar.gz
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: pyelevate.exe
-            asset_name: pyelevate-windows-x86_64
-            strip: false
+            bin: pyelevate.exe
+            archive: zip
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: pyelevate
+            archive: tar.gz
+
+    runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: '.'
-          cache-on-failure: true
-          cache-all-crates: true
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Install musl-tools (Linux musl only)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build release binary
+      - name: Package
+        shell: bash
         run: |
-          cargo build --release --target ${{ matrix.target }}
+          VERSION=${{ needs.version.outputs.version }}
+          NAME=pyelevate-${VERSION}-${{ matrix.target }}
 
-      - name: Strip binary (Unix-like only)
-        if: matrix.strip
-        run: |
-          strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          mkdir dist
+          cp target/${{ matrix.target }}/release/${{ matrix.bin }} dist/
 
-      - name: Prepare artifact directory
-        run: |
-          mkdir -p artifacts
-          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} artifacts/
-
-      - name: Create archive (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          cd artifacts
-          tar czf ../pyelevate-${{ matrix.asset_name }}.tar.gz *
-          cd ..
-
-      - name: Create archive (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cd artifacts
-          Compress-Archive -Path * -DestinationPath ..\pyelevate-${{ matrix.asset_name }}.zip
-          cd ..
-
-      - name: Calculate checksums
-        id: checksums
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            echo "archive=pyelevate-${{ matrix.asset_name }}.zip" >> $GITHUB_OUTPUT
-            certutil -hashfile pyelevate-${{ matrix.asset_name }}.zip SHA256 | head -1 > checksum.txt
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            powershell Compress-Archive -Path * -DestinationPath ../$NAME.zip
           else
-            echo "archive=pyelevate-${{ matrix.asset_name }}.tar.gz" >> $GITHUB_OUTPUT
-            sha256sum pyelevate-${{ matrix.asset_name }}.tar.gz > checksum.txt
+            tar -czf ../$NAME.tar.gz *
           fi
-        shell: bash
+          cd ..
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          sha256sum $NAME.* > $NAME.sha256
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: build-artifacts-${{ matrix.asset_name }}
+          name: ${{ matrix.target }}
           path: |
-            pyelevate-${{ matrix.asset_name }}.*
-            checksum.txt
-          retention-days: 1
+            *.zip
+            *.tar.gz
+            *.sha256
 
-  generate-changelog:
-    name: Generate Changelog
+  release:
+    needs: [version, build]
     runs-on: ubuntu-latest
-    outputs:
-      changelog: ${{ steps.changelog.outputs.content }}
-      version: ${{ steps.version.outputs.version }}
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
+          path: artifacts
 
-      - name: Generate changelog from commits
-        id: changelog
-        run: |
-          {
-            echo 'content<<EOF'
-            
-            # Release Notes
-            
-            **Release Time:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')**
-            
-            ## Changes in this release
-            
-            ### Features
-            git log --oneline --grep='feat' HEAD...HEAD~20 2>/dev/null | sed 's/^/- /' || echo "- No new features in this release"
-            
-            ### Bug Fixes
-            git log --oneline --grep='fix' HEAD...HEAD~20 2>/dev/null | sed 's/^/- /' || echo "- No bug fixes in this release"
-            
-            ### Documentation
-            git log --oneline --grep='docs' HEAD...HEAD~20 2>/dev/null | sed 's/^/- /' || echo "- No documentation updates in this release"
-            
-            ### Other Changes
-            git log --oneline HEAD~0..HEAD~19 2>/dev/null | head -10 | sed 's/^/- /' || echo "- See commit history for details"
-            
-            ## All Commits
-            
-            EOF
-            git log --pretty=format:"- %h: %s (%an, %ai)" HEAD~0..HEAD~49 >> changelog.txt 2>/dev/null || echo "See commit history for details" >> changelog.txt
-            cat changelog.txt >> $GITHUB_OUTPUT
-            echo 'EOF' >> $GITHUB_OUTPUT
-          }
-        shell: bash
-
-      - name: Get version
-        id: version
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | grep -oP '(?<=")\d+\.\d+\.\d+(?=")')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-  create-release:
-    name: Create Release
-    needs: [build, generate-changelog]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: softprops/action-gh-release@v2
         with:
-          fetch-depth: 0
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-artifacts
-
-      - name: Organize artifacts
-        run: |
-          mkdir -p release-files
-          find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "checksum.txt" \) -exec cp {} release-files/ \;
-          ls -lah release-files/
-
-      - name: Generate checksums manifest
-        run: |
-          {
-            echo "# PyElevate Release Checksums (SHA256)"
-            echo ""
-            echo "**Release Time:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo ""
-            echo "## Binary Checksums"
-            echo ""
-            
-            for file in release-files/*.tar.gz release-files/*.zip; do
-              if [ -f "$file" ]; then
-                filename=$(basename "$file")
-                if [[ "$file" == *.tar.gz ]]; then
-                  checksum=$(sha256sum "$file" | awk '{print $1}')
-                else
-                  checksum=$(sha256sum "$file" | awk '{print $1}')
-                fi
-                echo "### $filename"
-                echo "\`\`\`"
-                echo "$checksum"
-                echo "\`\`\`"
-                echo ""
-              fi
-            done
-          } > release-files/CHECKSUMS.md
+          tag_name: ${{ needs.version.outputs.version }}
+          name: PyElevate ${{ needs.version.outputs.version }}
+          files: artifacts/**/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
-          cat release-files/CHECKSUMS.md
-
-      - name: Create release body
-        id: release_body
-        run: |
-          {
-            echo 'body<<EOF'
-            echo "# PyElevate v${{ needs.generate-changelog.outputs.version }}"
-            echo ""
-            echo "**Released:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo ""
-            echo "## Release Summary"
-            echo ""
-            echo "Modern Python requirements.txt dependency upgrader with interactive TUI"
-            echo ""
-            echo "## Download"
-            echo ""
-            echo "| Platform | Binary | Checksum |"
-            echo "|----------|--------|----------|"
-            
-            for file in release-files/*.tar.gz release-files/*.zip; do
-              if [ -f "$file" ]; then
-                filename=$(basename "$file")
-                checksum=$(sha256sum "$file" | awk '{print $1}')
-                echo "| $(echo $filename | sed 's/pyelevate-//g' | sed 's/-/ /g' | sed 's/.tar.gz//g' | sed 's/.zip//g') | \`$filename\` | \`${checksum:0:16}...\` |"
-              fi
-            done
-            
-            echo ""
-            echo "## What's New"
-            echo ""
-            echo "See [CHANGELOG.md](CHANGELOG.md) for detailed changes."
-            echo ""
-            echo "## Installation"
-            echo ""
-            echo "### Linux"
-            echo "\`\`\`bash"
-            echo "tar xzf pyelevate-linux-x86_64.tar.gz"
-            echo "chmod +x pyelevate"
-            echo "./pyelevate"
-            echo "\`\`\`"
-            echo ""
-            echo "### macOS"
-            echo "\`\`\`bash"
-            echo "tar xzf pyelevate-macos-x86_64.tar.gz"
-            echo "chmod +x pyelevate"
-            echo "./pyelevate"
-            echo "\`\`\`"
-            echo ""
-            echo "### Windows"
-            echo "\`\`\`powershell"
-            echo "Expand-Archive pyelevate-windows-x86_64.zip"
-            echo ".\pyelevate\pyelevate.exe"
-            echo "\`\`\`"
-            echo ""
-            echo "## Features"
-            echo ""
-            echo "- 🎨 Interactive TUI with Ratatui"
-            echo "- 🚀 Async PyPI fetching with Tokio"
-            echo "- 📊 Smart version categorization"
-            echo "- 🔍 Fuzzy search and filtering"
-            echo "- ♿ Full keyboard navigation"
-            echo "- 🛡️ Safe upgrades with automatic backups"
-            echo "- 🔒 Lock file support"
-            echo "- 🧪 Dry-run mode"
-            echo ""
-            echo "## Verification"
-            echo ""
-            echo "All binaries are signed with SHA256 checksums. See CHECKSUMS.md for details."
-            echo ""
-            echo "## System Requirements"
-            echo ""
-            echo "- Linux: glibc or musl"
-            echo "- macOS: 10.13+ (Intel or Apple Silicon)"
-            echo "- Windows: Windows 7+"
-            echo ""
-            echo "EOF
-          } >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: v${{ needs.generate-changelog.outputs.version }}
-          name: PyElevate v${{ needs.generate-changelog.outputs.version }}
-          body: ${{ steps.release_body.outputs.body }}
-          draft: false
-          prerelease: false
-          files: release-files/*.tar.gz
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Windows ZIP as separate release asset
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-            
-            const releaseId = context.payload.release.id;
-            const zipFiles = fs.readdirSync('release-files').filter(f => f.endsWith('.zip'));
-            
-            for (const file of zipFiles) {
-              const filePath = path.join('release-files', file);
-              const fileContent = fs.readFileSync(filePath);
-              
-              await github.rest.repos.uploadReleaseAsset({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                release_id: releaseId,
-                name: file,
-                data: fileContent,
-                headers: {
-                  'content-length': fileContent.length,
-                  'content-type': 'application/zip'
-                }
-              });
-              
-              console.log(`Uploaded ${file}`);
-            }
-
-      - name: Upload checksums manifest
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const releaseId = context.payload.release.id;
-            const fileContent = fs.readFileSync('release-files/CHECKSUMS.md');
-            
-            await github.rest.repos.uploadReleaseAsset({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: releaseId,
-              name: 'CHECKSUMS.md',
-              data: fileContent,
-              headers: {
-                'content-length': fileContent.length,
-                'content-type': 'text/markdown'
-              }
-            });
-            
-            console.log('Uploaded CHECKSUMS.md');
-
-  finalize:
-    name: Finalize Release
-    needs: [create-release, generate-changelog]
-    runs-on: ubuntu-latest
-    if: success()
-    
-    steps:
-      - name: Release Summary
-        run: |
-          echo "✅ Release Complete!"
-          echo ""
-          echo "📦 PyElevate v${{ needs.generate-changelog.outputs.version }} has been released"
-          echo "⏰ Release time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo ""
-          echo "🎯 Available downloads:"
-          echo "  - Linux x86_64 (glibc)"
-          echo "  - Linux x86_64 (musl)"
-          echo "  - macOS x86_64"
-          echo "  - macOS aarch64 (Apple Silicon)"
-          echo "  - Windows x86_64"
-          echo ""
-          echo "🔐 All binaries include SHA256 checksums"
-          echo "📝 See CHECKSUMS.md for verification"
