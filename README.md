@@ -1,5 +1,7 @@
 # 🚀 PyElevate v0.2.0 - God Tier Python Dependency Manager
 
+![Showcase Image](gallery/image.png)
+
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Author](https://img.shields.io/badge/author-Soumalya%20Das-brightgreen.svg)](https://github.com/pro-grammer-SD)
